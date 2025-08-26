@@ -1,65 +1,114 @@
+import socketio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from .proctoring import ProctoringSystem, ProctoringLogger
+from .ai_models import ask_openai, ask_ollama
+import logging
 
+logging.basicConfig(level=logging.INFO)
+logging.info("Starting backend server...")
+
+# Create a FastAPI app
 app = FastAPI()
+logging.info("FastAPI app created.")
 
 # Allow CORS for the frontend to communicate with the backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Assuming frontend runs on port 3000
+    allow_origins=["http://localhost:3000"],  # Frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logging.info("CORS middleware added.")
 
-# Mock AI and Interview Questions
-interview_questions = [
-    "Tell me about yourself.",
-    "What are your strengths and weaknesses?",
-    "Why are you interested in this role?",
-    "Describe a challenging situation you faced at work and how you handled it.",
-    "Where do you see yourself in 5 years?",
-]
+# Create a Socket.IO server
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+socket_app = socketio.ASGIApp(sio)
+app.mount("/socket.io", socket_app)
+logging.info("Socket.IO server created and mounted.")
 
-# Initialize Proctoring System
-proctoring_logger = ProctoringLogger()
-proctoring_system = ProctoringSystem(logger=proctoring_logger)
 
-interview_state = {
-    "current_question_index": 0,
-    "interview_started": False,
-}
+# Dictionary to hold room information
+rooms = {}
 
-@app.post("/start-interview")
-async def start_interview():
-    proctoring_system.start()
-    proctoring_system.log_event("Interview started.")
-    interview_state["current_question_index"] = 0
-    interview_state["interview_started"] = True
-    return {"question": interview_questions[0]}
+@sio.event
+async def connect(sid, environ):
+    logging.info(f"Connected: {sid}")
 
-@app.post("/interview")
-async def handle_interview(request: Request):
-    if not interview_state["interview_started"]:
-        return {"error": "Interview not started."}, 400
+@sio.event
+async def disconnect(sid):
+    logging.info(f"Disconnected: {sid}")
+    # Remove user from any room they were in
+    for room_id, members in list(rooms.items()):
+        if sid in members:
+            members.remove(sid)
+            # if room is empty, delete it
+            if not members:
+                del rooms[room_id]
+            await sio.emit("user-left", {"sid": sid}, room=room_id)
+            break
 
+@sio.on("join")
+async def on_join(sid, data):
+    room_id = data.get("roomId")
+    logging.info(f"Received join event from {sid} for room {room_id}")
+    if not room_id:
+        return
+
+    await sio.enter_room(sid, room_id)
+    if room_id not in rooms:
+        rooms[room_id] = []
+
+    # Notify others in the room
+    await sio.emit("user-joined", {"sid": sid, "members": rooms[room_id]}, room=room_id, skip_sid=sid)
+    rooms[room_id].append(sid)
+    logging.info(f"{sid} joined room {room_id}")
+
+
+@sio.on("offer")
+async def on_offer(sid, data):
+    logging.info(f"Received offer from {sid} for {data['targetSid']}")
+    # Forward offer to the target user
+    await sio.emit("offer", data, room=data["targetSid"], skip_sid=sid)
+
+@sio.on("answer")
+async def on_answer(sid, data):
+    logging.info(f"Received answer from {sid} for {data['targetSid']}")
+    # Forward answer to the target user
+    await sio.emit("answer", data, room=data["targetSid"], skip_sid=sid)
+
+@sio.on("ice-candidate")
+async def on_ice_candidate(sid, data):
+    logging.info(f"Received ICE candidate from {sid} for {data['targetSid']}")
+    # Forward ICE candidate to the target user
+    await sio.emit("ice-candidate", data, room=data["targetSid"], skip_sid=sid)
+
+
+@app.post("/ask")
+async def ask_question(request: Request):
     data = await request.json()
-    user_answer = data.get("answer", "")
+    question = data.get("question")
+    model = data.get("model")
+    room_id = data.get("roomId")
+    logging.info(f"Received question '{question}' for model '{model}' in room '{room_id}'")
 
-    proctoring_system.log_event(f"Received answer for question {interview_state['current_question_index'] + 1}: {user_answer}")
+    if not all([question, model, room_id]):
+        return {"error": "Missing question, model, or roomId"}, 400
 
-    interview_state["current_question_index"] += 1
-    next_question_index = interview_state["current_question_index"]
-
-    if next_question_index < len(interview_questions):
-        next_question = interview_questions[next_question_index]
-        return {"question": next_question}
+    if model == "openai":
+        answer = ask_openai(question)
+    elif model == "ollama":
+        answer = ask_ollama(question)
     else:
-        proctoring_system.stop()
-        interview_state["interview_started"] = False
-        return {"message": "Interview completed."}
+        return {"error": "Invalid model specified"}, 400
+
+    # Broadcast the answer to everyone in the room
+    await sio.emit("question-answered", {"question": question, "answer": answer}, room=room_id)
+    logging.info(f"Answered question '{question}' with answer '{answer}' in room '{room_id}'")
+    return {"status": "success"}
 
 @app.get("/")
 def read_root():
     return {"Hello": "World"}
+
+logging.info("Backend server script finished executing.")

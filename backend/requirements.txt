@@ -1,2 +1,8 @@
 fastapi
 uvicorn
+python-socketio
+openai
+ollama
+python-dotenv
+requests
+hypercorn
