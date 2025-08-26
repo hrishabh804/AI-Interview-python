@@ -3,6 +3,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .ai_models import ask_openai, ask_ollama
 import logging
+import random
+from .coding_questions import QUESTIONS
 
 logging.basicConfig(level=logging.INFO)
 logging.info("Starting backend server...")
@@ -106,6 +108,62 @@ async def ask_question(request: Request):
     await sio.emit("question-answered", {"question": question, "answer": answer}, room=room_id)
     logging.info(f"Answered question '{question}' with answer '{answer}' in room '{room_id}'")
     return {"status": "success"}
+
+@app.post("/ask-coding-question")
+async def ask_coding_question(request: Request):
+    data = await request.json()
+    room_id = data.get("roomId")
+    if not room_id:
+        return {"error": "Missing roomId"}, 400
+
+    question = random.choice(QUESTIONS)
+    await sio.emit("coding-question", {"question": question}, room=room_id)
+    return {"status": "success"}
+
+
+@app.post("/run-code")
+async def run_code(request: Request):
+    data = await request.json()
+    code = data.get("code")
+    function_name = data.get("function_name")
+    tests = data.get("tests")
+
+    if not all([code, function_name, tests]):
+        return {"error": "Missing code, function_name, or tests"}, 400
+
+    results = []
+    for test in tests:
+        test_input = test["input"]
+        expected_output = test["output"]
+
+        try:
+            # Create a dictionary to serve as the global scope for exec
+            exec_globals = {}
+
+            # Execute the user's code
+            exec(code, exec_globals)
+
+            # Get the user's function from the executed code
+            user_function = exec_globals.get(function_name)
+
+            if not user_function:
+                results.append({"input": test_input, "output": f"Function '{function_name}' not found.", "passed": False})
+                continue
+
+            # Run the user's function with the test input
+            output = user_function(*test_input)
+
+            # Compare the output with the expected output
+            if str(output) == str(expected_output):
+                results.append({"input": test_input, "output": str(output), "expected": str(expected_output), "passed": True})
+            else:
+                results.append({"input": test_input, "output": str(output), "expected": str(expected_output), "passed": False})
+
+        except Exception as e:
+            results.append({"input": test_input, "output": str(e), "passed": False})
+
+    return {"results": results}
+
 
 @app.get("/")
 def read_root():
