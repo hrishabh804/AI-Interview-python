@@ -1,114 +1,109 @@
-import React, { useState, useEffect } from 'react';
-import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
-import Webcam from 'react-webcam';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
+import io from 'socket.io-client';
+import VideoCall from './VideoCall';
 import './App.css';
 
 const API_BASE_URL = 'http://localhost:8000';
 
 function App() {
-  const [interviewStarted, setInterviewStarted] = useState(false);
-  const [currentQuestion, setCurrentQuestion] = useState('');
-  const [isFinished, setIsFinished] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const {
-    transcript,
-    listening,
-    resetTranscript,
-    browserSupportsSpeechRecognition
-  } = useSpeechRecognition();
+    const [roomId, setRoomId] = useState('');
+    const [joined, setJoined] = useState(false);
+    const [question, setQuestion] = useState('');
+    const [model, setModel] = useState('openai');
+    const [log, setLog] = useState([]);
+    const socketRef = useRef();
 
-  useEffect(() => {
-    if (!browserSupportsSpeechRecognition) {
-      alert("Your browser does not support speech recognition. Please try Chrome.");
-    }
-  }, [browserSupportsSpeechRecognition]);
+    useEffect(() => {
+        if (joined) {
+            // The socket connection for WebRTC is handled in VideoCall.js
+            // This socket is for the Q&A part
+            socketRef.current = io.connect("http://localhost:8000", { path: "/socket.io" });
+            socketRef.current.on('question-answered', (data) => {
+                setLog(prevLog => [...prevLog, `Q: ${data.question}`, `A: ${data.answer}`]);
+            });
 
-  const speak = (text) => {
-    const utterance = new SpeechSynthesisUtterance(text);
-    window.speechSynthesis.speak(utterance);
-  };
+            return () => {
+                if(socketRef.current) {
+                    socketRef.current.disconnect();
+                }
+            };
+        }
+    }, [joined]);
 
-  const startInterview = async () => {
-    setIsLoading(true);
-    try {
-      const response = await axios.post(`${API_BASE_URL}/start-interview`);
-      const { question } = response.data;
-      setCurrentQuestion(question);
-      speak(question);
-      setInterviewStarted(true);
-      resetTranscript();
-      SpeechRecognition.startListening({ continuous: true });
-    } catch (error) {
-      console.error("Error starting interview:", error);
-      alert("Could not start interview. Make sure the backend server is running.");
-    }
-    setIsLoading(false);
-  };
+    const handleJoin = () => {
+        if (roomId) {
+            setJoined(true);
+        }
+    };
 
-  const submitAnswer = async () => {
-    setIsLoading(true);
-    SpeechRecognition.stopListening();
-    try {
-      const response = await axios.post(`${API_BASE_URL}/interview`, { answer: transcript });
-      if (response.data.message) {
-        // Interview finished
-        setCurrentQuestion(response.data.message);
-        speak(response.data.message);
-        setIsFinished(true);
-        setInterviewStarted(false);
-      } else {
-        const { question } = response.data;
-        setCurrentQuestion(question);
-        speak(question);
-        resetTranscript();
-        SpeechRecognition.startListening({ continuous: true });
-      }
-    } catch (error) {
-      console.error("Error submitting answer:", error);
-    }
-    setIsLoading(false);
-  };
+    const handleAsk = async () => {
+        if (question && model && roomId) {
+            await axios.post(`${API_BASE_URL}/ask`, { question, model, roomId });
+            setQuestion('');
+        }
+    };
 
-  return (
-    <div className="App">
-      <header className="App-header">
-        <h1>AI Video Interview</h1>
-        <div className="video-container">
-          <Webcam audio={false} mirrored={true} />
+    return (
+        <div className="App">
+            <header className="App-header">
+                <h1>Multi-User Video Call with AI</h1>
+                {!joined ? (
+                    <div className="join-container">
+                        <input
+                            type="text"
+                            placeholder="Enter Room ID"
+                            value={roomId}
+                            onChange={(e) => setRoomId(e.target.value)}
+                        />
+                        <button onClick={handleJoin}>Join Room</button>
+                    </div>
+                ) : (
+                    <>
+                        <h2>Room: {roomId}</h2>
+                        <VideoCall roomId={roomId} />
+                        <div className="qa-container">
+                            <h3>Ask a Question</h3>
+                            <div className="model-selector">
+                                <label>
+                                    <input
+                                        type="radio"
+                                        value="openai"
+                                        checked={model === 'openai'}
+                                        onChange={() => setModel('openai')}
+                                    />
+                                    OpenAI
+                                </label>
+                                <label>
+                                    <input
+                                        type="radio"
+                                        value="ollama"
+                                        checked={model === 'ollama'}
+                                        onChange={() => setModel('ollama')}
+                                    />
+                                    Ollama
+                                </label>
+                            </div>
+                            <textarea
+                                value={question}
+                                onChange={(e) => setQuestion(e.target.value)}
+                                placeholder="Type your question here..."
+                            />
+                            <button onClick={handleAsk}>Ask</button>
+                        </div>
+                        <div className="log-container">
+                            <h3>Interview Log</h3>
+                            <div className="log">
+                                {log.map((entry, index) => (
+                                    <p key={index}>{entry}</p>
+                                ))}
+                            </div>
+                        </div>
+                    </>
+                )}
+            </header>
         </div>
-
-        {isFinished ? (
-          <div className="finished-message">
-            <h2>{currentQuestion}</h2>
-            <p>Thank you for completing the interview.</p>
-          </div>
-        ) : interviewStarted ? (
-          <div className="interview-container">
-            <h2>Question:</h2>
-            <p>{currentQuestion}</p>
-            <div className="transcript-container">
-              <h3>Your Answer:</h3>
-              <p>{transcript}</p>
-            </div>
-            <div className="controls">
-              <button onClick={submitAnswer} disabled={isLoading || !listening}>
-                {isLoading ? 'Submitting...' : 'Submit Answer'}
-              </button>
-              <p>Mic: {listening ? 'on' : 'off'}</p>
-            </div>
-          </div>
-        ) : (
-          <div className="start-container">
-            <p>Click the button to start your interview.</p>
-            <button onClick={startInterview} disabled={isLoading}>
-              {isLoading ? 'Starting...' : 'Start Interview'}
-            </button>
-          </div>
-        )}
-      </header>
-    </div>
-  );
+    );
 }
 
 export default App;
