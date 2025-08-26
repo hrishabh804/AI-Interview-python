@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import io from 'socket.io-client';
 import VideoCall from './VideoCall';
+import CodeEditor from './CodeEditor';
 import './App.css';
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -13,14 +14,20 @@ function App() {
     const [model, setModel] = useState('openai');
     const [log, setLog] = useState([]);
     const socketRef = useRef();
+    const [codingQuestion, setCodingQuestion] = useState(null);
+    const [code, setCode] = useState('');
+    const [testResults, setTestResults] = useState([]);
 
     useEffect(() => {
         if (joined) {
-            // The socket connection for WebRTC is handled in VideoCall.js
-            // This socket is for the Q&A part
             socketRef.current = io.connect("http://localhost:8000", { path: "/socket.io" });
             socketRef.current.on('question-answered', (data) => {
                 setLog(prevLog => [...prevLog, `Q: ${data.question}`, `A: ${data.answer}`]);
+            });
+            socketRef.current.on('coding-question', (data) => {
+                setCodingQuestion(data.question);
+                setCode(data.question.template);
+                setTestResults([]);
             });
 
             return () => {
@@ -41,6 +48,24 @@ function App() {
         if (question && model && roomId) {
             await axios.post(`${API_BASE_URL}/ask`, { question, model, roomId });
             setQuestion('');
+        }
+    };
+
+    const handleAskCodingQuestion = async () => {
+        if (roomId) {
+            await axios.post(`${API_BASE_URL}/ask-coding-question`, { roomId });
+        }
+    };
+
+    const handleRunCode = async () => {
+        if (code && codingQuestion) {
+            const { function_name, tests } = codingQuestion;
+            const response = await axios.post(`${API_BASE_URL}/run-code`, {
+                code,
+                function_name,
+                tests,
+            });
+            setTestResults(response.data.results);
         }
     };
 
@@ -91,6 +116,30 @@ function App() {
                             />
                             <button onClick={handleAsk}>Ask</button>
                         </div>
+                        <div className="qa-container">
+                            <button onClick={handleAskCodingQuestion}>Ask a Coding Question</button>
+                        </div>
+                        {codingQuestion && (
+                            <div className="coding-challenge-container">
+                                <h3>{codingQuestion.title}</h3>
+                                <p>{codingQuestion.description}</p>
+                                <CodeEditor code={code} setCode={setCode} />
+                                <button onClick={handleRunCode}>Run Code</button>
+                                {testResults.length > 0 && (
+                                    <div className="results-container">
+                                        <h4>Test Results</h4>
+                                        {testResults.map((result, index) => (
+                                            <div key={index} className={`result ${result.passed ? 'passed' : 'failed'}`}>
+                                                <p>Input: {JSON.stringify(result.input)}</p>
+                                                <p>Output: {result.output}</p>
+                                                {!result.passed && <p>Expected: {result.expected}</p>}
+                                                <p>Status: {result.passed ? 'Passed' : 'Failed'}</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                         <div className="log-container">
                             <h3>Interview Log</h3>
                             <div className="log">
